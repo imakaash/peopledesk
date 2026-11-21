@@ -2,14 +2,31 @@
 import anthropic
 import streamlit as st
 
-from app import llm
+from app import llm, rag
 
 st.set_page_config(page_title="PeopleDesk", page_icon="💼")
 st.title("PeopleDesk")
 st.caption("HR assistant for Nimbus Labs")
 
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # [{"role": "user"|"assistant", "content": str}]
+    # [{"role": "user"|"assistant", "content": str, "sources": [...] (assistant only)}]
+    st.session_state.messages = []
+
+
+def show_sources(hits: list[dict]) -> None:
+    if hits:
+        with st.expander(f"Sources ({len(hits)})"):
+            for h in hits:
+                st.markdown(f"`{h['score']:.2f}` **{h['source']}** > {h['section']}")
+
+
+def api_messages(history: list[dict], last_user_turn: str) -> list[dict]:
+    """What Claude sees: earlier turns as plain text, and the newest question
+    replaced by its RAG-augmented version. Only role/content are sent; the API
+    rejects extra keys such as 'sources'."""
+    msgs = [{"role": m["role"], "content": m["content"]} for m in history[:-1]]
+    return msgs + [{"role": "user", "content": last_user_turn}]
+
 
 with st.sidebar:
     tier = llm.CONFIG["default_tier"]
@@ -25,6 +42,7 @@ with st.sidebar:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        show_sources(msg.get("sources", []))
 
 if prompt := st.chat_input("Ask about leave, benefits, payroll..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -32,9 +50,13 @@ if prompt := st.chat_input("Ask about leave, benefits, payroll..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
+        hits = rag.retrieve(prompt)  # milestone 5 passes the user's access tags here
         result: dict = {}
         try:
-            st.write_stream(llm.stream_chat(st.session_state.messages, result=result))
+            st.write_stream(llm.stream_chat(
+                api_messages(st.session_state.messages, rag.augment(prompt, hits)),
+                result=result,
+            ))
         except anthropic.AuthenticationError:
             st.session_state.messages.pop()
             st.error("Invalid or missing ANTHROPIC_API_KEY. Put it in .env (see .env.example).")
@@ -45,6 +67,6 @@ if prompt := st.chat_input("Ask about leave, benefits, payroll..."):
             st.stop()
 
     reply = result["reply"]
-    st.session_state.messages.append({"role": "assistant", "content": reply.text})
+    st.session_state.messages.append({"role": "assistant", "content": reply.text, "sources": hits})
     st.session_state.last_reply = reply
     st.rerun()  # refresh the sidebar usage panel

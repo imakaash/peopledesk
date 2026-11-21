@@ -15,3 +15,9 @@ models:
     max_tokens: 16000
 
 default_tier: cheap
+
+# Retrieval (milestone 2)
+rag:
+  chroma_path: .chroma         # local vector store, git-ignored; rebuild with `python -m app.rag ingest`
+  top_k: 4                     # chunks retrieved per question
+  min_score: 0.25              # cosine similarity cut-off; weaker matches are dropped

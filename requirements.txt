@@ -4,4 +4,7 @@ streamlit>=1.40
 pyyaml>=6.0
 python-dotenv>=1.0
 
-# Later milestones add: chromadb, mcp, pyjwt, presidio, arize-phoenix, pytest
+# Milestone 2: RAG
+chromadb>=1.5,<2
+
+# Later milestones add: mcp, pyjwt, presidio, arize-phoenix, pytest
