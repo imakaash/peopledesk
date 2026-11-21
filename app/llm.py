@@ -5,7 +5,7 @@ evals (milestone 9) only need to hook in here.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import Iterator
@@ -44,11 +44,12 @@ class Reply:
     tier: str
     stop_reason: str | None
     usage: dict
+    content: list = field(default_factory=list)  # raw blocks (text, thinking, tool_use) for the tool loop
 
 
-def _request(tier: str, system: str, messages: list[dict]) -> dict:
+def _request(tier: str, system: str, messages: list[dict], tools: list[dict] | None = None) -> dict:
     m = CONFIG["models"][tier]
-    return dict(
+    req = dict(
         model=m["id"],
         max_tokens=m["max_tokens"],
         # Thinking is adaptive by default on these models; effort sets how hard it thinks.
@@ -59,6 +60,11 @@ def _request(tier: str, system: str, messages: list[dict]) -> dict:
         system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         messages=messages,
     )
+    if tools:
+        # Tools render before the system prompt, so the cache breakpoint on the
+        # system block covers both.
+        req["tools"] = tools
+    return req
 
 
 def _open_stream(tier: str, req: dict):
@@ -77,6 +83,7 @@ def _to_reply(final, tier: str) -> Reply:
         model=final.model,
         tier=tier,
         stop_reason=final.stop_reason,
+        content=list(final.content),
         usage={
             "input_tokens": u.input_tokens,
             "output_tokens": u.output_tokens,
@@ -91,14 +98,16 @@ def stream_chat(
     system: str | None = None,
     tier: str | None = None,
     result: dict | None = None,
+    tools: list[dict] | None = None,
 ) -> Iterator[str]:
     """Yield the reply text as it arrives.
 
-    When the stream ends, the full Reply (model, stop reason, token usage) is
-    stored in result["reply"], so the UI can stream text and still show usage.
+    When the stream ends, the full Reply (model, stop reason, token usage, raw
+    content blocks) is stored in result["reply"], so the UI can stream text and
+    the agent can still run any tool calls.
     """
     tier = tier or CONFIG["default_tier"]
-    req = _request(tier, system or load_system_prompt(), messages)
+    req = _request(tier, system or load_system_prompt(), messages, tools)
     with _open_stream(tier, req) as stream:
         yield from stream.text_stream
         final = stream.get_final_message()

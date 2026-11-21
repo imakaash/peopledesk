@@ -22,6 +22,10 @@ rag:
   top_k: 4                     # chunks retrieved per question
   min_score: 0.25              # cosine similarity cut-off; weaker matches are dropped
 
+# Agent loop (milestone 4)
+agent:
+  max_tool_rounds: 6           # safety stop: model calls per turn before giving up
+
 # Harness memory (milestone 3)
 memory:
   db_path: data/memory.db      # episodic memory + user profiles (SQLite, git-ignored)

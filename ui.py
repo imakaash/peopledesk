@@ -32,6 +32,15 @@ def show_sources(hits: list[dict]) -> None:
                 st.markdown(f"`{h['score']:.2f}` **{h['source']}** > {h['section']}")
 
 
+def show_tools(calls: list[dict]) -> None:
+    if calls:
+        with st.expander(f"Tools used ({len(calls)})"):
+            for c in calls:
+                icon = "❌" if c["is_error"] else "✅"
+                st.markdown(f"{icon} **{c['name']}** `{c['input']}`")
+                st.code(c["output"][:1500], language="json")
+
+
 def show_memory(wm) -> None:
     """What the harness put into working memory for the last turn."""
     with st.expander("Working memory (last turn)"):
@@ -77,6 +86,7 @@ with st.sidebar:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        show_tools(msg.get("tools", []))
         show_sources(msg.get("sources", []))
 
 if prompt := st.chat_input("Ask about leave, benefits, payroll..."):
@@ -100,7 +110,9 @@ if prompt := st.chat_input("Ask about leave, benefits, payroll..."):
             st.stop()
 
     reply, wm = result["reply"], result["memory"]
-    st.session_state.messages.append({"role": "assistant", "content": reply.text, "sources": wm.hits})
+    st.session_state.messages.append(
+        {"role": "assistant", "content": reply.text, "sources": wm.hits, "tools": result["tool_calls"]}
+    )
     st.session_state.last_reply = reply
     st.session_state.last_memory = wm
     st.rerun()  # refresh the sidebar panels

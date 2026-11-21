@@ -2,7 +2,7 @@
 
 Per turn:
   1. assemble working memory: profile + facts + past episodes + skills + RAG docs
-  2. call the model (milestone 4 turns this into a tool loop)
+  2. run the agent loop: model -> tool calls (via MCP) -> model ... until it answers
   3. write the turn to episodic memory
   4. in the background, let the summarizer consolidate episodes into semantic memory
 
@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Iterator
 
-from app import llm, memory, rag, summarizer
+from app import llm, mcp_client, memory, rag, summarizer
 
 
 @dataclass
@@ -82,18 +82,55 @@ class Agent:
         )
 
     def stream(self, question: str, history: list[dict], result: dict) -> Iterator[str]:
-        """Yield the answer as it streams. Afterwards result holds 'reply' and 'memory'.
+        """Yield the answer as it streams. Afterwards result holds 'reply', 'memory'
+        and 'tool_calls'.
 
         `history` is the earlier turns of this session, without the new question.
         """
         wm = self.assemble(question)
         messages = window(history) + [{"role": "user", "content": wm.render()}]
-        inner: dict = {}
-        yield from llm.stream_chat(messages, result=inner)
-        reply = inner["reply"]
+        mcp = mcp_client.client()
+        tools = mcp.claude_tools()
+        tool_calls: list[dict] = []
+        texts: list[str] = []
+        usage: dict = {}
 
-        memory.save_episode(self.user_id, self.session_id, question, reply.text)
+        # THE AGENT LOOP: call the model; if it asks for tools, run them, send back
+        # the results, and call it again. Stop when it answers without a tool call.
+        for _ in range(llm.CONFIG["agent"]["max_tool_rounds"]):
+            inner: dict = {}
+            if texts:
+                yield "\n\n"  # separate text written before and after a tool round
+            yield from llm.stream_chat(messages, tools=tools, result=inner)
+            reply = inner["reply"]
+            usage = {k: usage.get(k, 0) + v for k, v in reply.usage.items()}
+            if reply.text:
+                texts.append(reply.text)
+            # Append the assistant turn exactly as returned, thinking blocks included.
+            messages.append({"role": "assistant", "content": reply.content})
+
+            if reply.stop_reason != "tool_use":
+                break  # end_turn, refusal, or max_tokens: never run tools from a cut-off turn
+
+            # One assistant turn may ask for several tools at once (parallel tool use).
+            # Every result goes back in ONE user message, matched by tool_use_id.
+            results = []
+            for block in (b for b in reply.content if b.type == "tool_use"):
+                out = mcp.call(block.name, block.input, caller=self.user_id)
+                tool_calls.append({"name": block.name, "input": block.input, "output": out.text, "is_error": out.is_error})
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": out.text, "is_error": out.is_error})
+            messages.append({"role": "user", "content": results})
+        else:
+            stop = "I had to stop after too many tool steps. Could you narrow the request down?"
+            texts.append(stop)
+            yield "\n\n" + stop
+
+        answer = "\n\n".join(texts)
+        memory.save_episode(self.user_id, self.session_id, question, answer)
         # Consolidation is a separate LLM call, so it runs off the request path.
-        threading.Thread(target=summarizer.maybe_consolidate, args=(self.user_id,), daemon=True).start()
+        threading.Thread(
+            target=summarizer.maybe_consolidate, args=(self.user_id,), daemon=True, name="summarizer"
+        ).start()
 
-        result.update(reply=reply, memory=wm)
+        reply.text, reply.usage = answer, usage
+        result.update(reply=reply, memory=wm, tool_calls=tool_calls)
