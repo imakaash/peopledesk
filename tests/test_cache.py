@@ -17,23 +17,25 @@ def test_collection(monkeypatch):
 
 def test_hit_for_same_role():
     cache.store(Q, "employee", "10 paid sick days.")
-    hit = cache.lookup(Q, "employee")
-    assert hit and hit["answer"] == "10 paid sick days."
+    hit, reason = cache.lookup(Q, "employee")
+    assert hit and hit["answer"] == "10 paid sick days." and reason == "hit"
 
 
 def test_scoped_by_role():
     # An hr_admin answer may quote HR-only docs: it must never be served to an employee.
     cache.store(Q, "hr_admin", "HR-internal answer")
-    assert cache.lookup(Q, "employee") is None
+    hit, reason = cache.lookup(Q, "employee")
+    assert hit is None and "role 'employee'" in reason
 
 
 def test_doc_or_prompt_change_invalidates(monkeypatch):
     cache.store(Q, "employee", "old answer")
     monkeypatch.setattr(cache, "fingerprint", lambda: "docs-were-edited")
-    assert cache.lookup(Q, "employee") is None
+    assert cache.lookup(Q, "employee")[0] is None
 
 
 def test_verifier_can_veto_a_close_match(monkeypatch):
     cache.store("How much parental leave does the primary caregiver get?", "employee", "16 weeks")
     monkeypatch.setattr(cache, "same_question", lambda a, b: False)
-    assert cache.lookup("How much parental leave does the secondary caregiver get?", "employee") is None
+    hit, reason = cache.lookup("How much parental leave does the secondary caregiver get?", "employee")
+    assert hit is None and reason.startswith("verifier")

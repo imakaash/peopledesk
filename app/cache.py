@@ -42,22 +42,23 @@ def fingerprint() -> str:
     return h.hexdigest()[:16]
 
 
-def lookup(question: str, role: str) -> dict | None:
+def lookup(question: str, role: str) -> tuple[dict | None, str]:
+    """Return (hit or None, reason). The reason makes misses explainable in the UI and traces."""
     if not CFG["enabled"]:
-        return None
+        return None, "answer cache disabled"
     col = rag.collection(COLLECTION)
     where = {"$and": [{"role": role}, {"fingerprint": fingerprint()}, {"created_at": {"$gt": time.time() - CFG["ttl_hours"] * 3600}}]}
     res = col.query(query_texts=[question], n_results=1, where=where)
     if not res["ids"][0]:
-        return None
-    score = 1 - res["distances"][0][0]
-    if score < CFG["min_similarity"]:
-        return None
+        return None, f"no cached answers yet for role '{role}'"
+    score = round(1 - res["distances"][0][0], 3)
     cached_q = res["documents"][0][0]
+    if score < CFG["min_similarity"]:
+        return None, f"closest cached question too different (similarity {score}): '{cached_q}'"
     if CFG["verify_with_llm"] and not same_question(question, cached_q):
-        return None
+        return None, f"verifier: not the same question as '{cached_q}' (similarity {score})"
     meta = res["metadatas"][0][0]
-    return {"answer": meta["answer"], "cached_question": cached_q, "score": round(score, 3)}
+    return {"answer": meta["answer"], "cached_question": cached_q, "score": score}, "hit"
 
 
 VERIFY_SYSTEM = """Decide whether two questions to an HR assistant ask for exactly the same information, so that one correct answer would fully and correctly answer both. Any difference in who (e.g. primary vs secondary caregiver), what (sick vs annual leave), where (Paris vs Berlin), or which rule (carry over vs pay out) means they are not the same. Rewording, word order, punctuation and politeness don't matter."""

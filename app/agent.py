@@ -141,7 +141,9 @@ class Agent:
 
         guard_in = guardrails.InputCheck(text=question, pii=pii, verdict=verdict["verdict"], reason=verdict["reason"])
         meta = {"route": route["route"], "route_reason": route["reason"], "tier": route["tier"],
-                "model": llm.CONFIG["models"][route["tier"]]["id"], "cache": None, "cost_usd": 0.0, "timings": timings}
+                "model": llm.CONFIG["models"][route["tier"]]["id"], "cache": None,
+                "cache_status": f"not checked: only the faq route uses it (this was '{route['route']}')",
+                "cost_usd": 0.0, "timings": timings}
         result.update(guard_in=guard_in, guard_out=None, question=question, tool_calls=[], meta=meta)
 
         if guard_in.blocked:
@@ -159,7 +161,7 @@ class Agent:
         is_faq = route["route"] == "faq"
         mcp = mcp_client.client()
         if is_faq:
-            hit = cache.lookup(question, self.role)
+            hit, meta["cache_status"] = cache.lookup(question, self.role)
             t = lap("cache_lookup", t)
             if hit:
                 yield hit["answer"]
@@ -226,6 +228,9 @@ class Agent:
         # Cache only answers that are safe to share: FAQ route, no tools, grounded, no PII.
         if is_faq and not tool_calls and guard_out.grounded and not guard_out.pii:
             cache.store(question, self.role, answer)
+            meta["cache_status"] += f"; answer stored for role '{self.role}'"
+        elif is_faq:
+            meta["cache_status"] += "; answer not stored (not grounded, used tools, or had PII)"
         t = lap("output_guard", t)
 
         # 5. MEMORY

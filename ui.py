@@ -89,7 +89,8 @@ def show_meta(m: dict | None) -> None:
         st.caption(f"⚡ answer cache hit · matched “{c['cached_question']}” (similarity {c['score']}) · "
                    f"{m['timings']['total']:.2f}s · $0 for the answer")
     else:
-        st.caption(f"route `{m['route']}` · `{m['model']}` · {m['timings'].get('total', 0):.2f}s · ${m['cost_usd']:.5f}")
+        st.caption(f"route `{m['route']}` · `{m['model']}` · {m['timings'].get('total', 0):.2f}s · ${m['cost_usd']:.5f}"
+                   + (f"  \nanswer cache: {m['cache_status']}" if m["route"] == "faq" else ""))
 
 
 def show_guard(g: dict | None) -> None:
@@ -145,6 +146,9 @@ with st.sidebar:
         with st.expander("Last reply: usage and timings"):
             m = st.session_state.get("last_meta", {})
             st.markdown(f"**Route:** `{m.get('route')}`: {m.get('route_reason', '')}")
+            st.markdown(f"**Answer cache:** {m.get('cache_status', '')}")
+            st.caption("Note: `cache_read_input_tokens` below is Anthropic *prompt* caching (the model ran, "
+                       "reading a repeated prefix cheaply). An *answer cache* hit skips the model entirely, so it shows no tokens.")
             st.json({"model": last.model, "stop_reason": last.stop_reason, **last.usage,
                      "cost_usd (main model)": m.get("cost_usd"), "timings_s": m.get("timings")})
     c1, c2 = st.columns(2)
