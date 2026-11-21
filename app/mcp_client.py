@@ -30,11 +30,13 @@ class ToolResult:
 
 
 class MCPClient:
-    def __init__(self) -> None:
+    def __init__(self, hr_db: str | None = None) -> None:
+        """`hr_db` points the server at another database file (evals use a fresh copy per case)."""
+        self._hr_db = hr_db
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True, name="mcp-loop").start()
         ready: concurrent.futures.Future = concurrent.futures.Future()
-        asyncio.run_coroutine_threadsafe(self._serve(ready), self._loop)
+        self._task = asyncio.run_coroutine_threadsafe(self._serve(ready), self._loop)
         self._tools = ready.result(timeout=30)
 
     async def _serve(self, ready: concurrent.futures.Future) -> None:
@@ -43,17 +45,29 @@ class MCPClient:
         # The stdio client passes only a small safe set of env vars to the subprocess.
         # The server needs the same JWT secret to verify tokens, so pass it explicitly.
         env = {**get_default_environment(), "JWT_SECRET": auth.jwt_secret()}
+        if self._hr_db:
+            env["PEOPLEDESK_HR_DB"] = self._hr_db
         params = StdioServerParameters(command=sys.executable, args=["-m", "app.mcp_server"], cwd=str(ROOT), env=env)
+        self._stop = asyncio.Event()
         try:
             async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
                 await session.initialize()
                 self._session = session
                 ready.set_result((await session.list_tools()).tools)
-                await asyncio.Event().wait()  # keep the session open for the life of the process
+                await self._stop.wait()  # stays open until close() (the app never calls it)
         except Exception as e:
             if not ready.done():
                 ready.set_exception(e)
             raise
+
+    def close(self) -> None:
+        """Shut down the server subprocess and the loop thread (evals start one per case)."""
+        self._loop.call_soon_threadsafe(self._stop.set)
+        try:
+            self._task.result(timeout=10)
+        except Exception:
+            pass
+        self._loop.call_soon_threadsafe(self._loop.stop)
 
     def claude_tools(self, role: str) -> list[dict]:
         """MCP tool definitions -> Claude tool definitions, for one role.

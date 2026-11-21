@@ -102,8 +102,10 @@ def payslip(emp: str, month: str) -> tuple:
     return (emp, month, gross, tax, social, pension, round(gross - tax - social - pension, 2))
 
 
-def main() -> None:
-    with sqlite3.connect(DB) as db:
+def main(path: Path | None = None, verbose: bool = True) -> None:
+    """Seed `path` (default data/hr.db). Evals pass a fresh file per case."""
+    path = path or DB
+    with sqlite3.connect(path) as db:
         db.executescript(SCHEMA)
         db.executemany("INSERT INTO employees VALUES (?, ?, ?, ?, ?, ?, ?, ?)", EMPLOYEES)
         db.executemany("INSERT INTO leave_balances VALUES (?, ?, ?, ?, ?, ?)", BALANCES)
@@ -117,7 +119,8 @@ def main() -> None:
             [payslip(e, m) for e in ANNUAL_SALARY for m in PAYSLIP_MONTHS],
         )
         db.executemany("INSERT INTO onboarding_tasks (employee_id, task, due_date, done) VALUES (?, ?, ?, ?)", ONBOARDING)
-    print(f"Seeded {DB}")
+    if verbose:
+        print(f"Seeded {path}")
 
 
 if __name__ == "__main__":

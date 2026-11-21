@@ -72,13 +72,14 @@ def window(history: list[dict], n: int | None = None) -> list[dict]:
 
 
 class Agent:
-    def __init__(self, token: str, session_id: str):
+    def __init__(self, token: str, session_id: str, mcp: mcp_client.MCPClient | None = None):
         # Identity comes only from the verified token: never from the chat or the model.
         claims = auth.verify_token(token)
         self.token = token
         self.user_id = claims["sub"]
         self.role = claims["role"]
         self.session_id = session_id
+        self._mcp = mcp  # None = the shared app client; evals pass one per case
 
     def assemble(self, question: str) -> WorkingMemory:
         """Full working memory: personal memory + skills + docs."""
@@ -129,6 +130,7 @@ class Agent:
         with tracing.cost_meter() as meter, tracing.span("peopledesk.turn", "AGENT", root_attrs) as turn:
             yield from self._run(question, history, result)
             m = result["meta"]
+            m["trace_id"] = format(turn.get_span_context().trace_id, "032x")  # to find this turn in Phoenix
             m["cost_usd_total"] = round(meter[0], 6)  # every LLM call this turn, not just the answer
             tracing.set_attrs(turn, {
                 "turn.route": m["route"], "turn.model": m["model"], "turn.cache_status": m["cache_status"],
@@ -185,7 +187,7 @@ class Agent:
 
         # 2. FAQ ROUTE: standalone policy question -> try the answer cache first.
         is_faq = route["route"] == "faq"
-        mcp = mcp_client.client()
+        mcp = self._mcp or mcp_client.client()
         if is_faq:
             hit, meta["cache_status"] = cache.lookup(question, self.role)
             t = lap("cache_lookup", t)
@@ -255,8 +257,10 @@ class Agent:
         # in the stored copy (what the UI re-renders and memory keeps). For strict
         # deployments, buffer the answer and check it before showing anything.
         user_memory = "\n".join(filter(None, [wm.profile, *(f"- {f}" for f in wm.facts)]))
+        tool_specs = [f"{t['name']}: {t['description']}" for t in tools]
+        context = f"today={date.today().isoformat()} user_id={self.user_id} role={self.role}"
         guard_out = guardrails.check_output(
-            "\n\n".join(texts), wm.hits, tool_calls, wm.skills, [t["name"] for t in tools], user_memory
+            "\n\n".join(texts), wm.hits, tool_calls, wm.skills, tool_specs, user_memory, context
         )
         if guard_out.grounded is False:
             yield guardrails.UNGROUNDED_NOTE

@@ -16,6 +16,7 @@ can ask for anything.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
@@ -27,7 +28,8 @@ from pydantic import Field
 
 from app import auth
 
-DB = Path(__file__).resolve().parent.parent / "data" / "hr.db"
+# Evals point each run at its own freshly seeded copy (see evals/run_evals.py).
+DB = Path(os.environ.get("PEOPLEDESK_HR_DB") or Path(__file__).resolve().parent.parent / "data" / "hr.db")
 mcp = FastMCP("peopledesk-hr", log_level="WARNING")  # INFO logs every request to stderr
 
 AuthToken = Annotated[str, Field(description="Set by the client, not by the model.")]

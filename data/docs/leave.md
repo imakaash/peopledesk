@@ -15,7 +15,7 @@ You get up to 10 days of paid sick leave per calendar year. Tell your manager be
 ## Parental leave
 The primary caregiver gets 16 weeks of fully paid parental leave. The secondary caregiver gets 6 weeks of fully paid parental leave, which can be taken in up to two blocks within 12 months of the birth or adoption. Tell HR at least 8 weeks before the leave starts.
 
-## Requesting and approving leave
+## Requesting leave: notice period and approval
 Request leave through PeopleDesk. For leave longer than 3 working days, request at least 2 weeks in advance. Your direct manager approves or declines within 3 working days. Approved leave shows in your leave balance straight away. If a request is declined, your manager has to give a reason.
 
 ## Unpaid leave and compassionate leave

@@ -135,7 +135,13 @@ GROUNDING_SYSTEM = """You check whether an HR assistant's answer is supported by
 
 Find claims in the answer about company policy, numbers, dates, deadlines, or someone's HR data that the sources do NOT support. Supported means stated in the sources or directly calculated from them, such as adding days or working out a deadline. Ignore greetings, offers to help, contact suggestions, and general advice that makes no factual claim.
 
-Every block in <sources> is a valid source, including [assistant instructions] and [skill ...] procedures: a fact stated in a skill is supported. [user memory] supports claims about the user's own plans, preferences and earlier conversations when the answer presents them as such ("you mentioned..."). It does NOT support claims about current HR records such as balances, request statuses or approvals; only tool results support those.
+Every block in <sources> is a valid source, including [assistant instructions], [context] and [skill ...] procedures: a fact stated in a skill is supported.
+
+Do NOT flag:
+- formatting and units: currency symbols, bold text, "EUR" vs "€"
+- restatements of the [context] (today's date, the user's id and role) or of a tool description (e.g. "meetings are 1 hour")
+- arithmetic and date reasoning done on the sources: days remaining, deadlines, weekdays, "9 days from today"
+- plain-language explanations of a tool's error or permission denial, and privacy statements consistent with the assistant instructions [user memory] supports claims about the user's own plans, preferences and earlier conversations when the answer presents them as such ("you mentioned..."). It does NOT support claims about current HR records such as balances, request statuses or approvals; only tool results support those.
 
 unsupported_claims must contain only the unsupported claims, quoted briefly. Never list a claim there that you consider supported. If everything is supported, return an empty list and grounded=true."""
 
@@ -152,14 +158,19 @@ GROUNDING_SCHEMA = {
 
 def check_grounding(
     answer: str, hits: list[dict], tool_calls: list[dict],
-    skills: list[dict] | None = None, tool_names: list[str] | None = None, user_memory: str = "",
+    skills: list[dict] | None = None, tool_specs: list[str] | None = None, user_memory: str = "",
+    context: str = "",
 ) -> dict:
     # The judge must see every legitimate source the model saw, or it flags facts that
-    # came from a source it didn't get: the system prompt (contacts, scope), the tools
-    # available (what the assistant can offer to do), docs, tool results, skills and memory.
+    # came from a source it didn't get: the system prompt (contacts, scope), the context
+    # line (today, role), the tools and their descriptions, docs, tool results, skills
+    # and memory. The eval found ~40% false alarms on tool answers before context and
+    # tool descriptions were added.
     sources = [f"[assistant instructions]\n{llm.load_system_prompt()}"]
-    if tool_names:
-        sources.append("[tools the assistant can use]\n" + ", ".join(tool_names))
+    if context:
+        sources.append(f"[context]\n{context}")
+    if tool_specs:
+        sources.append("[tools the assistant can use]\n" + "\n".join(tool_specs))
     sources += [f"[doc {h['source']} > {h['section']}]\n{h['text']}" for h in hits]
     sources += [f"[tool {c['name']}({json.dumps(c['input'])})]\n{c['output']}" for c in tool_calls]
     sources += [f"[skill {s['name']}]\n{s['body']}" for s in skills or []]
@@ -191,13 +202,14 @@ class OutputCheck:
 
 def check_output(
     answer: str, hits: list[dict], tool_calls: list[dict],
-    skills: list[dict] | None = None, tool_names: list[str] | None = None, user_memory: str = "",
+    skills: list[dict] | None = None, tool_specs: list[str] | None = None, user_memory: str = "",
+    context: str = "",
 ) -> OutputCheck:
     redacted, pii = redact_pii(answer)
     check = OutputCheck(text=redacted, pii=pii)
     # Only judge answers that had sources to be grounded in. "I don't have that policy" has nothing to check.
     if CFG["check_groundedness"] and (hits or tool_calls):
-        g = check_grounding(redacted, hits, tool_calls, skills, tool_names, user_memory)
+        g = check_grounding(redacted, hits, tool_calls, skills, tool_specs, user_memory, context)
         check.grounded, check.unsupported_claims = g["grounded"], g["unsupported_claims"]
         if not g["grounded"]:
             check.text += UNGROUNDED_NOTE

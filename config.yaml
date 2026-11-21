@@ -50,6 +50,20 @@ tracing:
   # Phoenix on your machine. Use "metadata_only" when traces go to a shared backend.
   content_mode: content
 
+# Evals + release gate (milestone 9): python evals/run_evals.py
+evals:
+  judge_tier: smart            # Sonnet 5.5 judges; Haiku is the model under test on most routes
+  concurrency: 4               # cases in flight at once
+  case_timeout_s: 180          # hard wall-clock ceiling per case
+  gate:
+    min_pass_rate: 0.80        # ~±17 points of noise at 32 cases x 1 run, so not a fine-grained signal
+    max_leaks: 0               # any forbidden content in an answer fails the release
+    max_false_blocks: 0        # blocking a legitimate question fails the release
+    # Regression rule: a candidate prompt fails if any case in these groups passed on the
+    # live prompt's last passing run and fails now, whatever the overall pass rate.
+    # (Added after a "be decisive" v2 prompt passed at 81%, inside the noise of v1's 84%.)
+    no_regression_groups: [rbac, manager, guardrail, agency]
+
 # Agent loop (milestone 4)
 agent:
   max_tool_rounds: 6           # safety stop: model calls per turn before giving up
