@@ -9,7 +9,10 @@ import pytest
 os.environ["JWT_SECRET"] = "test-secret-for-pytest-only-0123456789abcdef"
 os.environ["DEMO_PASSWORD"] = "nimbus123"
 
-from app import auth, llm, mcp_server  # noqa: E402
+from app import auth, llm, mcp_server, tracing  # noqa: E402
+
+# Tests never send spans to Phoenix, even when it's running.
+tracing._state.update(initialized=True, enabled=False)
 
 _spec = importlib.util.spec_from_file_location("seed", llm.ROOT / "data" / "seed.py")
 seed = importlib.util.module_from_spec(_spec)

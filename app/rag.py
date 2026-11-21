@@ -13,6 +13,7 @@ import chromadb
 import yaml
 from chromadb.config import Settings
 
+from app import tracing
 from app.llm import CONFIG, ROOT
 
 DOCS_DIR = ROOT / "data" / "docs"
@@ -91,17 +92,25 @@ def retrieve(query: str, access: list[str] | None = None, k: int | None = None) 
     """
     cfg = CONFIG["rag"]
     access = access or ["all"]
-    res = _collection().query(
-        query_texts=[query],
-        n_results=k or cfg["top_k"],
-        where={"access": {"$in": access}},
-    )
-    hits = []
-    for text, meta, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0]):
-        score = 1 - dist
-        if score >= cfg["min_score"]:  # drop weak matches so they don't distract the model
-            hits.append({"text": text, "score": round(score, 3), **meta})
-    return hits
+    with tracing.span("rag.retrieve", "RETRIEVER", {"rag.access": access}, input=query) as s:
+        res = _collection().query(
+            query_texts=[query],
+            n_results=k or cfg["top_k"],
+            where={"access": {"$in": access}},
+        )
+        hits = []
+        for text, meta, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0]):
+            score = 1 - dist
+            if score >= cfg["min_score"]:  # drop weak matches so they don't distract the model
+                hits.append({"text": text, "score": round(score, 3), **meta})
+        # OpenInference document attributes: Phoenix shows these as a ranked list with scores.
+        for i, h in enumerate(hits):
+            tracing.set_attrs(s, {
+                f"retrieval.documents.{i}.document.id": f"{h['source']} > {h['section']}",
+                f"retrieval.documents.{i}.document.score": h["score"],
+                f"retrieval.documents.{i}.document.content": h["text"] if tracing.content_enabled() else None,
+            })
+        return hits
 
 
 def format_documents(hits: list[dict]) -> str:

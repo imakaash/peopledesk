@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass, field
 from functools import cache
 
-from app import llm
+from app import llm, tracing
 
 CFG = llm.CONFIG["guardrails"]
 
@@ -65,11 +65,14 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
     """
     if not text.strip():
         return text, []
-    analyzer, anonymizer = _presidio()
-    found = analyzer.analyze(text, language="en", entities=CFG["pii_entities"], score_threshold=CFG["pii_min_score"])
-    if not found:
-        return text, []
-    return anonymizer.anonymize(text=text, analyzer_results=found).text, sorted({f.entity_type for f in found})
+    with tracing.span("guardrail.pii_redact", "GUARDRAIL") as s:
+        analyzer, anonymizer = _presidio()
+        found = analyzer.analyze(text, language="en", entities=CFG["pii_entities"], score_threshold=CFG["pii_min_score"])
+        entities = sorted({f.entity_type for f in found})
+        s.set_attribute("guardrail.pii_entities", entities)  # types only, never the values
+        if not found:
+            return text, []
+        return anonymizer.anonymize(text=text, analyzer_results=found).text, entities
 
 
 # --- 2: input classifier (Haiku) --------------------------------------------------
@@ -94,12 +97,17 @@ CLASSIFIER_SCHEMA = {
 
 
 def classify(text: str) -> dict:
-    # The message is wrapped in tags and labelled as data to classify, not instructions to follow.
-    reply = llm.complete(
-        [{"role": "user", "content": f"<message_to_classify>\n{text}\n</message_to_classify>"}],
-        system=CLASSIFIER_SYSTEM, tier="cheap", json_schema=CLASSIFIER_SCHEMA,
-    )
-    return json.loads(reply.text)
+    with tracing.span("guardrail.input_classifier", "GUARDRAIL") as s:
+        # The message is wrapped in tags and labelled as data to classify, not instructions to follow.
+        reply = llm.complete(
+            [{"role": "user", "content": f"<message_to_classify>\n{text}\n</message_to_classify>"}],
+            system=CLASSIFIER_SYSTEM, tier="cheap", json_schema=CLASSIFIER_SCHEMA, span_name="llm.classify",
+        )
+        verdict = json.loads(reply.text)
+        tracing.set_attrs(s, {"guardrail.verdict": verdict["verdict"], "guardrail.reason": verdict["reason"]})
+        if verdict["verdict"] != "allow":
+            tracing.error(s, f"blocked: {verdict['verdict']}")  # makes blocked turns easy to filter in Phoenix
+        return verdict
 
 
 @dataclass
@@ -127,6 +135,8 @@ GROUNDING_SYSTEM = """You check whether an HR assistant's answer is supported by
 
 Find claims in the answer about company policy, numbers, dates, deadlines, or someone's HR data that the sources do NOT support. Supported means stated in the sources or directly calculated from them, such as adding days or working out a deadline. Ignore greetings, offers to help, contact suggestions, and general advice that makes no factual claim.
 
+Every block in <sources> is a valid source, including [assistant instructions] and [skill ...] procedures: a fact stated in a skill is supported. [user memory] supports claims about the user's own plans, preferences and earlier conversations when the answer presents them as such ("you mentioned..."). It does NOT support claims about current HR records such as balances, request statuses or approvals; only tool results support those.
+
 unsupported_claims must contain only the unsupported claims, quoted briefly. Never list a claim there that you consider supported. If everything is supported, return an empty list and grounded=true."""
 
 GROUNDING_SCHEMA = {
@@ -142,26 +152,33 @@ GROUNDING_SCHEMA = {
 
 def check_grounding(
     answer: str, hits: list[dict], tool_calls: list[dict],
-    skills: list[dict] | None = None, tool_names: list[str] | None = None,
+    skills: list[dict] | None = None, tool_names: list[str] | None = None, user_memory: str = "",
 ) -> dict:
     # The judge must see every legitimate source the model saw, or it flags facts that
     # came from a source it didn't get: the system prompt (contacts, scope), the tools
-    # available (what the assistant can offer to do), docs, tool results and skills.
+    # available (what the assistant can offer to do), docs, tool results, skills and memory.
     sources = [f"[assistant instructions]\n{llm.load_system_prompt()}"]
     if tool_names:
         sources.append("[tools the assistant can use]\n" + ", ".join(tool_names))
     sources += [f"[doc {h['source']} > {h['section']}]\n{h['text']}" for h in hits]
     sources += [f"[tool {c['name']}({json.dumps(c['input'])})]\n{c['output']}" for c in tool_calls]
     sources += [f"[skill {s['name']}]\n{s['body']}" for s in skills or []]
+    if user_memory:
+        sources.append(f"[user memory: may be outdated]\n{user_memory}")
     prompt = (
         "<sources>\n" + ("\n\n".join(sources) or "(none)") + "\n</sources>\n\n"
         f"<answer>\n{answer}\n</answer>"
     )
-    reply = llm.complete(
-        [{"role": "user", "content": prompt}], system=GROUNDING_SYSTEM, tier="cheap",
-        json_schema=GROUNDING_SCHEMA, effort=CFG["judge_effort"],
-    )
-    return json.loads(reply.text)
+    with tracing.span("guardrail.groundedness", "GUARDRAIL", {"guardrail.sources": len(sources)}) as s:
+        reply = llm.complete(
+            [{"role": "user", "content": prompt}], system=GROUNDING_SYSTEM, tier="cheap",
+            json_schema=GROUNDING_SCHEMA, effort=CFG["judge_effort"], span_name="llm.judge_groundedness",
+        )
+        g = json.loads(reply.text)
+        tracing.set_attrs(s, {"guardrail.grounded": g["grounded"], "guardrail.unsupported_claims": g["unsupported_claims"]})
+        if not g["grounded"]:
+            tracing.error(s, "ungrounded answer")
+        return g
 
 
 @dataclass
@@ -174,13 +191,13 @@ class OutputCheck:
 
 def check_output(
     answer: str, hits: list[dict], tool_calls: list[dict],
-    skills: list[dict] | None = None, tool_names: list[str] | None = None,
+    skills: list[dict] | None = None, tool_names: list[str] | None = None, user_memory: str = "",
 ) -> OutputCheck:
     redacted, pii = redact_pii(answer)
     check = OutputCheck(text=redacted, pii=pii)
     # Only judge answers that had sources to be grounded in. "I don't have that policy" has nothing to check.
     if CFG["check_groundedness"] and (hits or tool_calls):
-        g = check_grounding(redacted, hits, tool_calls, skills, tool_names)
+        g = check_grounding(redacted, hits, tool_calls, skills, tool_names, user_memory)
         check.grounded, check.unsupported_claims = g["grounded"], g["unsupported_claims"]
         if not g["grounded"]:
             check.text += UNGROUNDED_NOTE

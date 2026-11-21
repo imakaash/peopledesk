@@ -87,9 +87,10 @@ def show_meta(m: dict | None) -> None:
     if m.get("cache"):
         c = m["cache"]
         st.caption(f"⚡ answer cache hit · matched “{c['cached_question']}” (similarity {c['score']}) · "
-                   f"{m['timings']['total']:.2f}s · $0 for the answer")
+                   f"{m['timings']['total']:.2f}s · ${m.get('cost_usd_total', 0):.5f} total (triage + verifier only)")
     else:
-        st.caption(f"route `{m['route']}` · `{m['model']}` · {m['timings'].get('total', 0):.2f}s · ${m['cost_usd']:.5f}"
+        st.caption(f"route `{m['route']}` · `{m['model']}` · {m['timings'].get('total', 0):.2f}s · "
+                   f"${m.get('cost_usd_total', m['cost_usd']):.5f} total (answer ${m['cost_usd']:.5f})"
                    + (f"  \nanswer cache: {m['cache_status']}" if m["route"] == "faq" else ""))
 
 
@@ -137,6 +138,8 @@ with st.sidebar:
         logout()
         st.rerun()
     st.divider()
+    if llm.CONFIG["tracing"]["enabled"]:
+        st.markdown(f"**Traces:** [{llm.CONFIG['tracing']['endpoint']}]({llm.CONFIG['tracing']['endpoint']}) (Phoenix)")
     tiers = llm.CONFIG["routing"]["tiers"]
     st.markdown("**Routing:** " + " · ".join(f"{r} → `{llm.CONFIG['models'][t]['id']}`" for r, t in tiers.items()))
     st.markdown(f"**Prompt:** `system_{llm.CONFIG['prompt_version']}.md`")

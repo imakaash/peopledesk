@@ -27,7 +27,7 @@ import time
 import uuid
 from functools import cache as memoize
 
-from app import llm, rag
+from app import llm, rag, tracing
 
 CFG = llm.CONFIG["answer_cache"]
 COLLECTION = "answer_cache"
@@ -44,6 +44,15 @@ def fingerprint() -> str:
 
 def lookup(question: str, role: str) -> tuple[dict | None, str]:
     """Return (hit or None, reason). The reason makes misses explainable in the UI and traces."""
+    with tracing.span("answer_cache.lookup", "CHAIN", {"cache.role": role}, input=question) as s:
+        hit, reason = _lookup(question, role)
+        tracing.set_attrs(s, {"cache.hit": hit is not None, "cache.reason": reason,
+                              "cache.similarity": hit["score"] if hit else None})
+        tracing.io(s, output=hit["answer"] if hit else reason)
+        return hit, reason
+
+
+def _lookup(question: str, role: str) -> tuple[dict | None, str]:
     if not CFG["enabled"]:
         return None, "answer cache disabled"
     col = rag.collection(COLLECTION)
@@ -90,6 +99,7 @@ def same_question(a: str, b: str) -> bool:
         [{"role": "user", "content": f"<question_a>\n{a}\n</question_a>\n<question_b>\n{b}\n</question_b>"}],
         system=VERIFY_SYSTEM, tier="cheap", json_schema=VERIFY_SCHEMA,
         effort=CFG["verify_effort"],  # at "low" the same pair flipped between yes and no
+        span_name="llm.cache_verify",
     )
     return json.loads(reply.text)["same"]
 

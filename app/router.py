@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from app import llm
+from app import llm, tracing
 
 CFG = llm.CONFIG["routing"]
 
@@ -39,9 +39,12 @@ def route(question: str, previous_user_message: str | None = None) -> dict:
     if not CFG["enabled"]:
         return {"route": "simple", "reason": "routing disabled", "tier": llm.CONFIG["default_tier"]}
     prev = f"<previous_user_message>\n{previous_user_message}\n</previous_user_message>\n" if previous_user_message else ""
-    reply = llm.complete(
-        [{"role": "user", "content": f"{prev}<message_to_route>\n{question}\n</message_to_route>"}],
-        system=SYSTEM, tier="cheap", json_schema=SCHEMA,
-    )
-    r = json.loads(reply.text)
-    return {**r, "tier": CFG["tiers"][r["route"]]}
+    with tracing.span("router", "CHAIN") as s:
+        reply = llm.complete(
+            [{"role": "user", "content": f"{prev}<message_to_route>\n{question}\n</message_to_route>"}],
+            system=SYSTEM, tier="cheap", json_schema=SCHEMA, span_name="llm.route",
+        )
+        r = json.loads(reply.text)
+        tier = CFG["tiers"][r["route"]]
+        tracing.set_attrs(s, {"router.route": r["route"], "router.reason": r["reason"], "router.model": llm.CONFIG["models"][tier]["id"]})
+        return {**r, "tier": tier}

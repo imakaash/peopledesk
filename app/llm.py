@@ -14,6 +14,8 @@ import anthropic
 import yaml
 from dotenv import load_dotenv
 
+from app import tracing
+
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
@@ -33,8 +35,12 @@ def load_system_prompt(version: str | None = None) -> str:
 
 @cache
 def client() -> anthropic.Anthropic:
+    # Tracing must be registered before the client exists, so the SDK's own spans
+    # go to the same tracer provider as ours.
+    tracing.init(CONFIG["tracing"])
+    mode = "content" if tracing.content_enabled() else "metadata_only"
     # Reads ANTHROPIC_API_KEY from the environment (.env is loaded above).
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(open_telemetry={"traces": {"content_mode": mode}})
 
 
 @dataclass
@@ -116,6 +122,7 @@ def stream_chat(
     tier: str | None = None,
     result: dict | None = None,
     tools: list[dict] | None = None,
+    span_name: str = "llm.answer",
 ) -> Iterator[str]:
     """Yield the reply text as it arrives.
 
@@ -125,10 +132,17 @@ def stream_chat(
     """
     tier = tier or CONFIG["default_tier"]
     req = _request(tier, system or load_system_prompt(), messages, tools)
-    with _open_stream(tier, req) as stream:
-        yield from stream.text_stream
-        final = stream.get_final_message()
-    reply = _to_reply(final, tier)
+    # CHAIN, not LLM: the SDK's child span is the LLM span (with token counts).
+    # Ours names the purpose ("llm.answer round 2") and carries the cost.
+    with tracing.span(span_name, "CHAIN", {"peopledesk.effort": req["output_config"]["effort"], "peopledesk.tools": len(tools or [])},
+                      input=messages[-1]["content"]) as s:
+        with _open_stream(tier, req) as stream:
+            yield from stream.text_stream
+            final = stream.get_final_message()
+        reply = _to_reply(final, tier)
+        tracing.record_llm(s, reply.model, reply.usage, cost_usd(reply.usage, tier))
+        tracing.io(s, output=reply.text or [b.type for b in reply.content])
+        s.set_attribute("llm.stop_reason", str(reply.stop_reason))
     if final.stop_reason == "refusal" and not any(b.type == "text" for b in final.content):
         yield reply.text
     if result is not None:
@@ -141,6 +155,7 @@ def complete(
     tier: str | None = None,
     json_schema: dict | None = None,
     effort: str | None = None,
+    span_name: str = "llm.complete",
 ) -> Reply:
     """Non-streaming call, for background jobs such as classifiers, summaries and judges.
 
@@ -154,8 +169,13 @@ def complete(
         req["output_config"]["effort"] = effort
     if json_schema:
         req["output_config"]["format"] = {"type": "json_schema", "schema": json_schema}
-    if tier == "smart":
-        final = client().beta.messages.create(**req, betas=[FALLBACK_BETA], fallbacks="default")
-    else:
-        final = client().messages.create(**req)
-    return _to_reply(final, tier)
+    with tracing.span(span_name, "CHAIN", {"peopledesk.effort": req["output_config"]["effort"]},
+                      input=messages[-1]["content"]) as s:
+        if tier == "smart":
+            final = client().beta.messages.create(**req, betas=[FALLBACK_BETA], fallbacks="default")
+        else:
+            final = client().messages.create(**req)
+        reply = _to_reply(final, tier)
+        tracing.record_llm(s, reply.model, reply.usage, cost_usd(reply.usage, tier))
+        tracing.io(s, output=reply.text)
+    return reply

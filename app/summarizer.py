@@ -12,7 +12,7 @@ import json
 import sys
 from datetime import date
 
-from app import llm, memory
+from app import llm, memory, tracing
 
 SYSTEM = """You maintain the long-term memory of PeopleDesk, the HR assistant at Nimbus Labs.
 
@@ -51,8 +51,11 @@ def consolidate(user_id: str) -> dict | None:
         f"<known_facts>\n{known}\n</known_facts>\n"
         f"<new_conversations>\n{convo}\n</new_conversations>"
     )
-    reply = llm.complete([{"role": "user", "content": prompt}], system=SYSTEM, tier="cheap", json_schema=SCHEMA)
-    data = json.loads(reply.text)
+    with tracing.span("memory.consolidate", "CHAIN", {"memory.episodes": len(episodes), "user.id": user_id}) as s:
+        reply = llm.complete([{"role": "user", "content": prompt}], system=SYSTEM, tier="cheap",
+                             json_schema=SCHEMA, span_name="llm.summarize")
+        data = json.loads(reply.text)
+        s.set_attribute("memory.new_facts", len(data["new_facts"]))
     memory.set_profile(user_id, data["profile"])
     memory.add_facts(user_id, data["new_facts"])
     memory.mark_consolidated([e["id"] for e in episodes])

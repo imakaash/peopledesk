@@ -41,6 +41,15 @@ rag:
   top_k: 4                     # chunks retrieved per question
   min_score: 0.25              # cosine similarity cut-off; weaker matches are dropped
 
+# Observability (milestone 8): traces go to a local Phoenix (`phoenix serve`)
+tracing:
+  enabled: true                # quietly off if Phoenix isn't running
+  endpoint: http://localhost:6006
+  project: peopledesk
+  # "content" records prompts, answers and tool results in spans; fine for a local
+  # Phoenix on your machine. Use "metadata_only" when traces go to a shared backend.
+  content_mode: content
+
 # Agent loop (milestone 4)
 agent:
   max_tool_rounds: 6           # safety stop: model calls per turn before giving up
