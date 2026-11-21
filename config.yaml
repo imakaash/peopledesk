@@ -31,6 +31,8 @@ answer_cache:
   # tiny Haiku check confirms the two questions really ask the same thing.
   min_similarity: 0.80
   verify_with_llm: true
+  verify_effort: medium        # "low" gave inconsistent verdicts on "do I get" vs "do we get"
+  candidates: 3                # verify up to this many close matches, best first
   ttl_hours: 24
 
 # Retrieval (milestone 2)

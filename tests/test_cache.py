@@ -39,3 +39,12 @@ def test_verifier_can_veto_a_close_match(monkeypatch):
     monkeypatch.setattr(cache, "same_question", lambda a, b: False)
     hit, reason = cache.lookup("How much parental leave does the secondary caregiver get?", "employee")
     assert hit is None and reason.startswith("verifier")
+
+
+def test_second_candidate_can_hit(monkeypatch):
+    # The closest match is rejected, but the next one is the same question.
+    cache.store("how many sick days do i get?", "employee", "A")
+    cache.store("How many sick days do employees get?", "employee", "B")
+    monkeypatch.setattr(cache, "same_question", lambda a, b: "employees" in b)
+    hit, _ = cache.lookup("How many sick days do we get?", "employee")
+    assert hit and hit["answer"] == "B"

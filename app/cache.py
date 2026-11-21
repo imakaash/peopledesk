@@ -48,20 +48,34 @@ def lookup(question: str, role: str) -> tuple[dict | None, str]:
         return None, "answer cache disabled"
     col = rag.collection(COLLECTION)
     where = {"$and": [{"role": role}, {"fingerprint": fingerprint()}, {"created_at": {"$gt": time.time() - CFG["ttl_hours"] * 3600}}]}
-    res = col.query(query_texts=[question], n_results=1, where=where)
+    res = col.query(query_texts=[question], n_results=CFG["candidates"], where=where)
     if not res["ids"][0]:
         return None, f"no cached answers yet for role '{role}'"
-    score = round(1 - res["distances"][0][0], 3)
-    cached_q = res["documents"][0][0]
-    if score < CFG["min_similarity"]:
-        return None, f"closest cached question too different (similarity {score}): '{cached_q}'"
-    if CFG["verify_with_llm"] and not same_question(question, cached_q):
-        return None, f"verifier: not the same question as '{cached_q}' (similarity {score})"
-    meta = res["metadatas"][0][0]
-    return {"answer": meta["answer"], "cached_question": cached_q, "score": score}, "hit"
+    rejected = []
+    # Try the closest few: the best embedding match isn't always the right one
+    # ("do I get" can score above "do employees get" for "do we get").
+    for cached_q, meta, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0]):
+        score = round(1 - dist, 3)
+        if score < CFG["min_similarity"]:
+            break  # results are sorted best first, so the rest are worse
+        if not CFG["verify_with_llm"] or same_question(question, cached_q):
+            return {"answer": meta["answer"], "cached_question": cached_q, "score": score}, "hit"
+        rejected.append(f"'{cached_q}' ({score})")
+    if rejected:
+        return None, "verifier rejected: " + ", ".join(rejected)
+    best_q, best = res["documents"][0][0], round(1 - res["distances"][0][0], 3)
+    return None, f"closest cached question too different (similarity {best}): '{best_q}'"
 
 
-VERIFY_SYSTEM = """Decide whether two questions to an HR assistant ask for exactly the same information, so that one correct answer would fully and correctly answer both. Any difference in who (e.g. primary vs secondary caregiver), what (sick vs annual leave), where (Paris vs Berlin), or which rule (carry over vs pay out) means they are not the same. Rewording, word order, punctuation and politeness don't matter."""
+VERIFY_SYSTEM = """Decide whether two questions to an HR assistant ask for exactly the same information, so that one correct general-policy answer would fully and correctly answer both.
+
+They are different when they differ in:
+- which group the policy treats differently: primary vs secondary caregiver, full-time vs part-time, new joiners vs everyone
+- what is asked about: sick vs annual leave, hotels vs flights
+- where: Paris vs Berlin
+- which rule: carry over vs pay out, notice vs approval time
+
+These do NOT make them different: the person asking ("I", "we", "employees", "staff" asking about the same general entitlement), rewording, word order, punctuation and politeness."""
 
 VERIFY_SCHEMA = {
     "type": "object",
@@ -75,6 +89,7 @@ def same_question(a: str, b: str) -> bool:
     reply = llm.complete(
         [{"role": "user", "content": f"<question_a>\n{a}\n</question_a>\n<question_b>\n{b}\n</question_b>"}],
         system=VERIFY_SYSTEM, tier="cheap", json_schema=VERIFY_SCHEMA,
+        effort=CFG["verify_effort"],  # at "low" the same pair flipped between yes and no
     )
     return json.loads(reply.text)["same"]
 
