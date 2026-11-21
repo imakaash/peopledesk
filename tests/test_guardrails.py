@@ -6,9 +6,22 @@ with real model calls in the eval suite (milestone 9).
 """
 import pytest
 
-from app import guardrails, llm, memory
+from app import guardrails, llm, memory, router
 from app.agent import Agent
 from conftest import token_for
+
+
+@pytest.fixture
+def no_llm_triage(monkeypatch):
+    """Stub the two LLM triage calls; `seen` records what the classifier was given."""
+    seen = {}
+
+    def classify(text):
+        seen["text"] = text
+        return {"verdict": "injection", "reason": "stub"}
+    monkeypatch.setattr(guardrails, "classify", classify)
+    monkeypatch.setattr(router, "route", lambda *a: {"route": "simple", "reason": "stub", "tier": "cheap"})
+    return seen
 
 
 # --- PII redaction (real Presidio) --------------------------------------------------
@@ -32,9 +45,7 @@ def test_normal_hr_details_pass_through():
 
 # --- input guardrail: a block ends the turn before the agent loop -----------------
 
-def test_blocked_input_never_reaches_model_or_memory(monkeypatch):
-    monkeypatch.setattr(guardrails, "classify", lambda text: {"verdict": "injection", "reason": "stub"})
-
+def test_blocked_input_never_reaches_model_or_memory(monkeypatch, no_llm_triage):
     def must_not_run(*a, **k):
         raise AssertionError("blocked turn must not reach this")
     monkeypatch.setattr(llm, "stream_chat", must_not_run)
@@ -46,12 +57,12 @@ def test_blocked_input_never_reaches_model_or_memory(monkeypatch):
     assert result["reply"].stop_reason == "guardrail_blocked"
 
 
-def test_pii_is_redacted_before_classifier(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(guardrails, "classify", lambda text: seen.setdefault("text", text) and {"verdict": "allow", "reason": ""})
-    check = guardrails.check_input("Pay my expenses to DE89370400440532013000")
-    assert "DE8937" not in seen["text"] and "DE8937" not in check.text
-    assert not check.blocked
+def test_pii_is_redacted_before_any_llm_sees_it(no_llm_triage):
+    result = {}
+    "".join(Agent(token_for("alice"), "t").stream("Pay my expenses to DE89370400440532013000", [], result))
+    assert "DE8937" not in no_llm_triage["text"]       # the classifier got the masked text
+    assert "DE8937" not in result["question"]          # and so do history and memory
+    assert result["guard_in"].pii == ["IBAN_CODE"]
 
 
 # --- output guardrail ---------------------------------------------------------------

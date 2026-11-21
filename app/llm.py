@@ -64,7 +64,24 @@ def _request(tier: str, system: str, messages: list[dict], tools: list[dict] | N
         # Tools render before the system prompt, so the cache breakpoint on the
         # system block covers both.
         req["tools"] = tools
+        # Automatic breakpoint on the last block, but only for tool requests. In a tool
+        # loop, round N+1 re-sends round N's conversation and reads it back from the
+        # cache. A single call with no tools would pay the write premium on a unique
+        # question that's never read again.
+        req["cache_control"] = {"type": "ephemeral"}
     return req
+
+
+def cost_usd(usage: dict, tier: str) -> float:
+    """Price a usage dict. Cached reads cost a tenth (Haiku) or a twentieth (Sonnet) of
+    normal input. Cache writes cost 1.25x, so a prefix pays off from its second use."""
+    p = CONFIG["models"][tier]["usd_per_mtok"]
+    return (
+        usage.get("input_tokens", 0) * p["input"]
+        + usage.get("output_tokens", 0) * p["output"]
+        + usage.get("cache_read_input_tokens", 0) * p["cache_read"]
+        + usage.get("cache_creation_input_tokens", 0) * p["cache_write"]
+    ) / 1_000_000
 
 
 def _open_stream(tier: str, req: dict):

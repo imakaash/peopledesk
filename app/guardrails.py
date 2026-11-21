@@ -117,14 +117,8 @@ class InputCheck:
     def safe_reply(self) -> str:
         return SAFE_REPLIES.get(self.verdict, "")
 
-
-def check_input(text: str) -> InputCheck:
-    redacted, pii = redact_pii(text)
-    check = InputCheck(text=redacted, pii=pii)
-    if CFG["classify_input"]:
-        c = classify(redacted)  # classify the redacted text, so PII never reaches the classifier either
-        check.verdict, check.reason = c["verdict"], c["reason"]
-    return check
+# The agent runs these as separate stages: redact_pii() first, then classify() on the
+# redacted text in parallel with routing and retrieval (see agent.py, step 1).
 
 
 # --- 4: groundedness (Haiku as judge) ---------------------------------------------

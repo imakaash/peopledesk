@@ -9,12 +9,29 @@ models:
     id: claude-haiku-5-5
     effort: low
     max_tokens: 4000
+    usd_per_mtok: {input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125}
   smart:                       # multi-step, tool-heavy requests and the eval judge
     id: claude-sonnet-5-5
     effort: medium
     max_tokens: 16000
+    usd_per_mtok: {input: 2.00, output: 10.00, cache_read: 0.10, cache_write: 2.50}
 
 default_tier: cheap
+
+# Routing (milestone 7): a Haiku call picks a route; each route maps to a model tier.
+routing:
+  enabled: true
+  tiers: {faq: cheap, simple: cheap, complex: smart}
+
+# Semantic answer cache (milestone 7): reuse answers to repeated policy FAQs.
+answer_cache:
+  enabled: true
+  # Embeddings can't separate near-misses: "primary" vs "secondary caregiver" scored 0.974,
+  # higher than real paraphrases (0.81-0.89). So similarity only finds a candidate, and a
+  # tiny Haiku check confirms the two questions really ask the same thing.
+  min_similarity: 0.80
+  verify_with_llm: true
+  ttl_hours: 24
 
 # Retrieval (milestone 2)
 rag:

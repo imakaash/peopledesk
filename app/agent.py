@@ -1,24 +1,27 @@
 """THE HARNESS: everything around the model that turns one LLM call into an assistant.
 
 Per turn:
-  0. input guardrails: redact PII, block injection / off-topic (ends the turn early)
-  1. assemble working memory: profile + facts + past episodes + skills + RAG docs
-  2. run the agent loop: model -> tool calls (via MCP) -> model ... until it answers
-  3. output guardrails: redact PII, check groundedness
-  4. write the turn to episodic memory
-  5. in the background, let the summarizer consolidate episodes into semantic memory
+  0. redact PII locally, so nothing below sees raw card numbers or IBANs
+  1. triage, in parallel: input classifier | router | memory + RAG assembly
+     -> blocked (injection / off-topic)? safe reply, stop
+  2. FAQ route: answer cache hit? return it (no model call), stop
+  3. run the agent loop on the routed model: model -> tools (MCP) -> model ... until done
+  4. output guardrails: redact PII, check groundedness; store FAQ answers in the cache
+  5. save the turn to episodic memory, consolidate in the background
 
 The system prompt stays fixed. Everything that changes per user or per question
-goes into the final user turn, so the system prefix can be cached.
+goes into the final user turn, so the tools + system prefix is prompt-cached.
 """
 from __future__ import annotations
 
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Iterator
 
-from app import auth, guardrails, llm, mcp_client, memory, rag, summarizer
+from app import auth, cache, guardrails, llm, mcp_client, memory, rag, router, summarizer
 
 
 @dataclass
@@ -78,6 +81,7 @@ class Agent:
         self.session_id = session_id
 
     def assemble(self, question: str) -> WorkingMemory:
+        """Full working memory: personal memory + skills + docs."""
         facts = memory.relevant_facts(self.user_id, question)
         # Query expansion: "when do I tell HR about my leave?" doesn't say *which* leave,
         # but memory might ("Alice plans parental leave..."). Searching with the top facts
@@ -95,40 +99,96 @@ class Agent:
             hits=rag.retrieve(search_query, access=auth.doc_access(self.role)),
         )
 
+    def assemble_faq(self, question: str) -> WorkingMemory:
+        """Docs-only working memory for the FAQ route. No profile, facts, episodes or
+        history, so the answer doesn't depend on who asked. That's what makes it safe
+        to cache and give to other users with the same role."""
+        return WorkingMemory(
+            user_id=self.user_id, role=self.role, question=question,
+            skills=memory.match_skills(question),
+            hits=rag.retrieve(question, access=auth.doc_access(self.role)),
+        )
+
     def stream(self, question: str, history: list[dict], result: dict) -> Iterator[str]:
-        """Yield the answer as it streams. Afterwards result holds 'reply', 'memory'
-        and 'tool_calls'.
+        """Yield the answer as it streams. Afterwards `result` holds reply, memory,
+        tool_calls, guard_in, guard_out, question (redacted) and meta (route, cache, cost, timings).
 
         `history` is the earlier turns of this session, without the new question.
         """
-        # INPUT GUARDRAILS: redact PII, then screen for injection / off-topic.
-        # A blocked turn ends here: no retrieval, no tools, and it's not saved to memory.
-        guard_in = guardrails.check_input(question)
-        question = guard_in.text
+        t_start = time.perf_counter()
+        timings: dict[str, float] = {}
+
+        def lap(name: str, since: float) -> float:
+            now = time.perf_counter()
+            timings[name] = round(now - since, 3)
+            return now
+
+        # 0. PII first: it's local and fast, and nothing after it sees the raw text.
+        question, pii = guardrails.redact_pii(question)
+        prev_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), None)
+
+        # 1. TRIAGE IN PARALLEL. These three don't depend on each other, so running them
+        # side by side costs max(latencies), not their sum. On a blocked turn the
+        # speculative router/memory work is wasted, but it's cheap.
+        t = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            f_verdict = ex.submit(guardrails.classify, question) if guardrails.CFG["classify_input"] else None
+            f_route = ex.submit(router.route, question, prev_user)
+            f_wm = ex.submit(self.assemble, question)
+            verdict = f_verdict.result() if f_verdict else {"verdict": "allow", "reason": "classifier disabled"}
+            route, wm = f_route.result(), f_wm.result()
+        t = lap("triage", t)
+
+        guard_in = guardrails.InputCheck(text=question, pii=pii, verdict=verdict["verdict"], reason=verdict["reason"])
+        meta = {"route": route["route"], "route_reason": route["reason"], "tier": route["tier"],
+                "model": llm.CONFIG["models"][route["tier"]]["id"], "cache": None, "cost_usd": 0.0, "timings": timings}
+        result.update(guard_in=guard_in, guard_out=None, question=question, tool_calls=[], meta=meta)
+
         if guard_in.blocked:
+            # "End loop" guardrail: no model answer, no tools, not saved to memory.
             yield guard_in.safe_reply
+            meta.update(route="blocked", model="guardrail")
             result.update(
                 reply=llm.Reply(guard_in.safe_reply, model="guardrail", tier="none", stop_reason="guardrail_blocked", usage={}),
                 memory=WorkingMemory(user_id=self.user_id, role=self.role, question=question),
-                tool_calls=[], guard_in=guard_in, guard_out=None, question=question,
             )
+            lap("total", t_start)
             return
 
-        wm = self.assemble(question)
-        messages = window(history) + [{"role": "user", "content": wm.render()}]
+        # 2. FAQ ROUTE: standalone policy question -> try the answer cache first.
+        is_faq = route["route"] == "faq"
         mcp = mcp_client.client()
-        tools = mcp.claude_tools(self.role)
+        if is_faq:
+            hit = cache.lookup(question, self.role)
+            t = lap("cache_lookup", t)
+            if hit:
+                yield hit["answer"]
+                meta.update(cache=hit, model="answer-cache")
+                memory.save_episode(self.user_id, self.session_id, question, hit["answer"])
+                result.update(
+                    reply=llm.Reply(hit["answer"], model="answer-cache", tier="none", stop_reason="cache_hit", usage={}),
+                    memory=WorkingMemory(user_id=self.user_id, role=self.role, question=question),
+                )
+                lap("total", t_start)
+                return
+            wm = self.assemble_faq(question)
+            messages = [{"role": "user", "content": wm.render()}]  # no history: standalone by definition
+            tools: list[dict] = []                                 # docs-only: nothing user-specific
+        else:
+            messages = window(history) + [{"role": "user", "content": wm.render()}]
+            tools = mcp.claude_tools(self.role)
+
+        # 3. THE AGENT LOOP: call the model; if it asks for tools, run them, send back
+        # the results, and call it again. Stop when it answers without a tool call.
+        tier = route["tier"]
         tool_calls: list[dict] = []
         texts: list[str] = []
         usage: dict = {}
-
-        # THE AGENT LOOP: call the model; if it asks for tools, run them, send back
-        # the results, and call it again. Stop when it answers without a tool call.
         for _ in range(llm.CONFIG["agent"]["max_tool_rounds"]):
             inner: dict = {}
             if texts:
                 yield "\n\n"  # separate text written before and after a tool round
-            yield from llm.stream_chat(messages, tools=tools, result=inner)
+            yield from llm.stream_chat(messages, tools=tools or None, tier=tier, result=inner)
             reply = inner["reply"]
             usage = {k: usage.get(k, 0) + v for k, v in reply.usage.items()}
             if reply.text:
@@ -151,8 +211,9 @@ class Agent:
             stop = "I had to stop after too many tool steps. Could you narrow the request down?"
             texts.append(stop)
             yield "\n\n" + stop
+        t = lap("agent_loop", t)
 
-        # OUTPUT GUARDRAILS: redact PII, and check the answer against its sources.
+        # 4. OUTPUT GUARDRAILS: redact PII, and check the answer against its sources.
         # Trade-off: the answer has already streamed, so a redaction only takes effect
         # in the stored copy (what the UI re-renders and memory keeps). For strict
         # deployments, buffer the answer and check it before showing anything.
@@ -162,7 +223,12 @@ class Agent:
         if guard_out.grounded is False:
             yield guardrails.UNGROUNDED_NOTE
         answer = guard_out.text
+        # Cache only answers that are safe to share: FAQ route, no tools, grounded, no PII.
+        if is_faq and not tool_calls and guard_out.grounded and not guard_out.pii:
+            cache.store(question, self.role, answer)
+        t = lap("output_guard", t)
 
+        # 5. MEMORY
         memory.save_episode(self.user_id, self.session_id, question, answer)
         # Consolidation is a separate LLM call, so it runs off the request path.
         threading.Thread(
@@ -170,4 +236,6 @@ class Agent:
         ).start()
 
         reply.text, reply.usage = answer, usage
-        result.update(reply=reply, memory=wm, tool_calls=tool_calls, guard_in=guard_in, guard_out=guard_out, question=question)
+        meta["cost_usd"] = round(llm.cost_usd(usage, tier), 6)  # main model only; see tracing (m8) for the rest
+        lap("total", t_start)
+        result.update(reply=reply, memory=wm, tool_calls=tool_calls, guard_out=guard_out)

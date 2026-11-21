@@ -14,7 +14,7 @@ st.caption("HR assistant for Nimbus Labs")
 
 def reset_chat() -> None:
     """Start a new session: a new session_id means this chat becomes 'past episodes' next time."""
-    for k in ("messages", "last_memory", "last_reply"):
+    for k in ("messages", "last_memory", "last_reply", "last_meta"):
         st.session_state.pop(k, None)
 
 
@@ -80,6 +80,18 @@ def show_tools(calls: list[dict]) -> None:
                 st.code(c["output"][:1500], language="json")
 
 
+def show_meta(m: dict | None) -> None:
+    """One line per answer: how it was produced and what it cost."""
+    if not m:
+        return
+    if m.get("cache"):
+        c = m["cache"]
+        st.caption(f"⚡ answer cache hit · matched “{c['cached_question']}” (similarity {c['score']}) · "
+                   f"{m['timings']['total']:.2f}s · $0 for the answer")
+    else:
+        st.caption(f"route `{m['route']}` · `{m['model']}` · {m['timings'].get('total', 0):.2f}s · ${m['cost_usd']:.5f}")
+
+
 def show_guard(g: dict | None) -> None:
     if not g:
         return
@@ -124,14 +136,17 @@ with st.sidebar:
         logout()
         st.rerun()
     st.divider()
-    tier = llm.CONFIG["default_tier"]
-    st.markdown(f"**Model:** `{llm.CONFIG['models'][tier]['id']}`")
+    tiers = llm.CONFIG["routing"]["tiers"]
+    st.markdown("**Routing:** " + " · ".join(f"{r} → `{llm.CONFIG['models'][t]['id']}`" for r, t in tiers.items()))
     st.markdown(f"**Prompt:** `system_{llm.CONFIG['prompt_version']}.md`")
     if wm := st.session_state.get("last_memory"):
         show_memory(wm)
     if last := st.session_state.get("last_reply"):
-        with st.expander("Last reply usage"):
-            st.json({"model": last.model, "stop_reason": last.stop_reason, **last.usage})
+        with st.expander("Last reply: usage and timings"):
+            m = st.session_state.get("last_meta", {})
+            st.markdown(f"**Route:** `{m.get('route')}`: {m.get('route_reason', '')}")
+            st.json({"model": last.model, "stop_reason": last.stop_reason, **last.usage,
+                     "cost_usd (main model)": m.get("cost_usd"), "timings_s": m.get("timings")})
     c1, c2 = st.columns(2)
     if c1.button("New chat"):
         reset_chat()
@@ -157,6 +172,7 @@ with st.sidebar:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        show_meta(msg.get("meta"))
         show_tools(msg.get("tools", []))
         show_sources(msg.get("sources", []))
         show_guard(msg.get("guard"))
@@ -187,7 +203,9 @@ if prompt := st.chat_input("Ask about leave, benefits, payroll..."):
     st.session_state.messages.append({
         "role": "assistant", "content": reply.text, "sources": wm.hits, "tools": result["tool_calls"],
         "guard": {"in": result["guard_in"], "out": result["guard_out"]},
+        "meta": result["meta"],
     })
     st.session_state.last_reply = reply
     st.session_state.last_memory = wm
+    st.session_state.last_meta = result["meta"]
     st.rerun()  # refresh the sidebar panels
