@@ -21,3 +21,11 @@ rag:
   chroma_path: .chroma         # local vector store, git-ignored; rebuild with `python -m app.rag ingest`
   top_k: 4                     # chunks retrieved per question
   min_score: 0.25              # cosine similarity cut-off; weaker matches are dropped
+
+# Harness memory (milestone 3)
+memory:
+  db_path: data/memory.db      # episodic memory + user profiles (SQLite, git-ignored)
+  history_window: 10           # working memory: last N chat messages sent verbatim
+  recent_episodes: 3           # episodic: past Q&A pairs from earlier sessions
+  facts_top_k: 5               # semantic: long-term facts retrieved per question
+  consolidate_every_n: 3       # summarizer runs once this many episodes are unconsolidated

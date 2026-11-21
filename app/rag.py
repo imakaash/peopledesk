@@ -20,17 +20,24 @@ COLLECTION = "hr_docs"
 
 
 @cache
-def _collection():
-    client = chromadb.PersistentClient(
+def chroma_client():
+    return chromadb.PersistentClient(
         path=str(ROOT / CONFIG["rag"]["chroma_path"]),
         settings=Settings(anonymized_telemetry=False),
     )
+
+
+def collection(name: str):
     # Chroma embeds text locally with all-MiniLM-L6-v2 (it downloads ~80 MB on first use).
     # Cosine distance: similarity = 1 - distance, so 1.0 means identical meaning.
-    return client.get_or_create_collection(COLLECTION, configuration={"hnsw": {"space": "cosine"}})
+    return chroma_client().get_or_create_collection(name, configuration={"hnsw": {"space": "cosine"}})
 
 
-def _parse(path: Path) -> tuple[dict, str]:
+def _collection():
+    return collection(COLLECTION)
+
+
+def parse_frontmatter(path: Path) -> tuple[dict, str]:
     """Split a markdown file into its frontmatter (title, access) and its body."""
     _, front, body = path.read_text().split("---", 2)
     return yaml.safe_load(front), body
@@ -44,7 +51,7 @@ def chunk_doc(path: Path) -> list[dict]:
     section heading are put at the start of the chunk text, so the embedding (and the
     model) knows where the text came from.
     """
-    meta, body = _parse(path)
+    meta, body = parse_frontmatter(path)
     chunks = []
     for i, block in enumerate(s for s in body.split("\n## ") if s.strip()):
         heading, _, text = block.lstrip("# ").partition("\n")
@@ -97,12 +104,8 @@ def retrieve(query: str, access: list[str] | None = None, k: int | None = None) 
     return hits
 
 
-def augment(question: str, hits: list[dict]) -> str:
-    """Build the user turn: retrieved docs first, then the question.
-
-    The docs go in the user message, not the system prompt. That keeps the system
-    prompt byte-identical on every request, so prompt caching works (milestone 7).
-    """
+def format_documents(hits: list[dict]) -> str:
+    """Render retrieved chunks for the prompt. The agent places this in the user turn."""
     if not hits:
         docs = "<no_matching_documents/>"
     else:
@@ -110,7 +113,7 @@ def augment(question: str, hits: list[dict]) -> str:
             f'<document source="{h["source"]}" section="{h["section"]}">\n{h["text"]}\n</document>'
             for h in hits
         )
-    return f"<company_documents>\n{docs}\n</company_documents>\n\n<question>\n{question}\n</question>"
+    return f"<company_documents>\n{docs}\n</company_documents>"
 
 
 if __name__ == "__main__":

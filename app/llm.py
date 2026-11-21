@@ -109,10 +109,21 @@ def stream_chat(
         result["reply"] = reply
 
 
-def complete(messages: list[dict], system: str | None = None, tier: str | None = None) -> Reply:
-    """Non-streaming call, for background jobs such as classifiers and judges."""
+def complete(
+    messages: list[dict],
+    system: str | None = None,
+    tier: str | None = None,
+    json_schema: dict | None = None,
+) -> Reply:
+    """Non-streaming call, for background jobs such as classifiers, summaries and judges.
+
+    With json_schema, structured outputs guarantee reply.text is JSON matching the
+    schema, so callers can json.loads() it without defensive parsing.
+    """
     tier = tier or CONFIG["default_tier"]
     req = _request(tier, system or load_system_prompt(), messages)
+    if json_schema:
+        req["output_config"]["format"] = {"type": "json_schema", "schema": json_schema}
     if tier == "smart":
         final = client().beta.messages.create(**req, betas=[FALLBACK_BETA], fallbacks="default")
     else:
