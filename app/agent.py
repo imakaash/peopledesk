@@ -16,12 +16,13 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Iterator
 
-from app import llm, mcp_client, memory, rag, summarizer
+from app import auth, llm, mcp_client, memory, rag, summarizer
 
 
 @dataclass
 class WorkingMemory:
     user_id: str
+    role: str
     question: str
     profile: str = ""
     facts: list[str] = field(default_factory=list)
@@ -31,7 +32,7 @@ class WorkingMemory:
 
     def render(self) -> str:
         parts = [
-            f'<context today="{date.today().isoformat()}" user_id="{self.user_id}"/>',
+            f'<context today="{date.today().isoformat()}" user_id="{self.user_id}" role="{self.role}"/>',
             f"<user_profile>\n{self.profile or 'No profile yet.'}\n</user_profile>",
         ]
         if self.facts:
@@ -41,7 +42,12 @@ class WorkingMemory:
                 f"[{e['created_at'][:10]}] User: {e['question']}\nAssistant: {e['answer'][:400]}"
                 for e in self.episodes
             )
-            parts.append(f"<recent_conversations>\n{eps}\n</recent_conversations>")
+            # Labelled at the point of use: statuses and balances in old chats go stale.
+            parts.append(
+                '<recent_conversations note="From earlier sessions. Statuses, balances and requests mentioned '
+                'here may have changed; check with a tool before stating them as current.">\n'
+                f"{eps}\n</recent_conversations>"
+            )
         if self.skills:
             parts.append("<skills>\n" + "\n".join(
                 f'<skill name="{s["name"]}">\n{s["body"]}\n</skill>' for s in self.skills
@@ -61,8 +67,12 @@ def window(history: list[dict], n: int | None = None) -> list[dict]:
 
 
 class Agent:
-    def __init__(self, user_id: str, session_id: str):
-        self.user_id = user_id
+    def __init__(self, token: str, session_id: str):
+        # Identity comes only from the verified token: never from the chat or the model.
+        claims = auth.verify_token(token)
+        self.token = token
+        self.user_id = claims["sub"]
+        self.role = claims["role"]
         self.session_id = session_id
 
     def assemble(self, question: str) -> WorkingMemory:
@@ -73,12 +83,14 @@ class Agent:
         search_query = " ".join([question, *facts[:2]])
         return WorkingMemory(
             user_id=self.user_id,
+            role=self.role,
             question=question,
             profile=memory.get_profile(self.user_id),
             facts=facts,
             episodes=memory.recent_episodes(self.user_id, exclude_session=self.session_id),
             skills=memory.match_skills(question),
-            hits=rag.retrieve(search_query),  # milestone 5 passes the user's access tags here
+            # RBAC for documents: the role's tags filter the vector search itself.
+            hits=rag.retrieve(search_query, access=auth.doc_access(self.role)),
         )
 
     def stream(self, question: str, history: list[dict], result: dict) -> Iterator[str]:
@@ -90,7 +102,7 @@ class Agent:
         wm = self.assemble(question)
         messages = window(history) + [{"role": "user", "content": wm.render()}]
         mcp = mcp_client.client()
-        tools = mcp.claude_tools()
+        tools = mcp.claude_tools(self.role)
         tool_calls: list[dict] = []
         texts: list[str] = []
         usage: dict = {}
@@ -116,7 +128,7 @@ class Agent:
             # Every result goes back in ONE user message, matched by tool_use_id.
             results = []
             for block in (b for b in reply.content if b.type == "tool_use"):
-                out = mcp.call(block.name, block.input, caller=self.user_id)
+                out = mcp.call(block.name, block.input, token=self.token)
                 tool_calls.append({"name": block.name, "input": block.input, "output": out.text, "is_error": out.is_error})
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": out.text, "is_error": out.is_error})
             messages.append({"role": "user", "content": results})

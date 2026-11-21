@@ -15,11 +15,12 @@ from dataclasses import dataclass
 from functools import cache
 
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
 
+from app import auth
 from app.llm import ROOT
 
-HIDDEN_ARGS = {"caller"}  # filled in by the harness, never shown to or chosen by the model
+HIDDEN_ARGS = {"auth_token"}  # filled in by the harness, never shown to or chosen by the model
 
 
 @dataclass
@@ -39,7 +40,10 @@ class MCPClient:
     async def _serve(self, ready: concurrent.futures.Future) -> None:
         # The session lives inside this one long-running task, so its async context
         # managers are entered and exited in the same task, as anyio requires.
-        params = StdioServerParameters(command=sys.executable, args=["-m", "app.mcp_server"], cwd=str(ROOT))
+        # The stdio client passes only a small safe set of env vars to the subprocess.
+        # The server needs the same JWT secret to verify tokens, so pass it explicitly.
+        env = {**get_default_environment(), "JWT_SECRET": auth.jwt_secret()}
+        params = StdioServerParameters(command=sys.executable, args=["-m", "app.mcp_server"], cwd=str(ROOT), env=env)
         try:
             async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
                 await session.initialize()
@@ -51,14 +55,19 @@ class MCPClient:
                 ready.set_exception(e)
             raise
 
-    def claude_tools(self) -> list[dict]:
-        """MCP tool definitions -> Claude tool definitions.
+    def claude_tools(self, role: str) -> list[dict]:
+        """MCP tool definitions -> Claude tool definitions, for one role.
 
-        Sorted by name so the tools block is byte-identical on every request; any
-        change there would break prompt caching. Hidden args are removed from the schema.
+        Layer 1 of RBAC: the model only sees tools the role may use. An employee's
+        model doesn't know approve_leave exists. (Layer 2, the real check, is in the server.)
+        Sorted by name so the tools block is byte-identical per role on every request;
+        any change there would break prompt caching. Hidden args are removed from the schema.
         """
+        allowed = auth.allowed_tools(role)
         tools = []
         for t in sorted(self._tools, key=lambda t: t.name):
+            if t.name not in allowed:
+                continue
             schema = json.loads(json.dumps(t.inputSchema))  # deep copy
             for arg in HIDDEN_ARGS:
                 schema.get("properties", {}).pop(arg, None)
@@ -67,10 +76,11 @@ class MCPClient:
             tools.append({"name": t.name, "description": t.description or "", "input_schema": schema})
         return tools
 
-    def call(self, name: str, args: dict, caller: str) -> ToolResult:
-        # The harness sets the identity. Anything the model put in `caller` is overwritten.
+    def call(self, name: str, args: dict, token: str) -> ToolResult:
+        # The harness attaches the user's signed token. If the model tried to put an
+        # auth_token in args, it's overwritten here.
         future = asyncio.run_coroutine_threadsafe(
-            self._session.call_tool(name, {**args, "caller": caller}), self._loop
+            self._session.call_tool(name, {**args, "auth_token": token}), self._loop
         )
         try:
             res = future.result(timeout=30)
@@ -86,5 +96,5 @@ def client() -> MCPClient:
 
 
 if __name__ == "__main__":
-    for t in client().claude_tools():
-        print(f"- {t['name']}: {list(t['input_schema'].get('properties', {}))}")
+    for role in auth.ROLES:
+        print(role, "->", [t["name"] for t in client().claude_tools(role)])

@@ -10,4 +10,8 @@ chromadb>=1.5,<2
 # Milestone 4: MCP tools
 mcp>=1.20,<2
 
-# Later milestones add: pyjwt, presidio, arize-phoenix, pytest
+# Milestone 5: auth + RBAC
+pyjwt>=2.8,<3
+pytest>=8
+
+# Later milestones add: presidio, arize-phoenix

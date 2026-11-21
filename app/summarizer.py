@@ -20,7 +20,11 @@ You receive a user's current profile, the facts already stored about them, and t
 - profile: an updated 2-4 sentence profile of the user (role, team, start date, how they like answers), keeping what is still true and adding what is new.
 - new_facts: facts worth remembering for future conversations that are not already stored. Each fact must stand alone (name the user, and give absolute dates instead of "next month"). Good facts: plans ("Alice plans parental leave from 2027-03-01"), preferences ("Alice prefers short answers"), situations ("Alice joined on 2026-11-03 and is in probation"). Return an empty list if nothing new is worth keeping.
 
-Don't store medical details, salary figures, passwords, or personal data about other people. Don't store general policy facts, since those live in the company documents."""
+Only store durable facts that the HR system doesn't already hold. Don't store:
+- live HR state, such as leave balances, request ids or statuses, task completion or payslip figures. The HR tools are the source of truth, and these change without the conversation knowing.
+- logs of what was asked or refused ("Alice asked X and was told Y"). The episode history already has those.
+- medical details, salary figures, passwords, or personal data about other people.
+- general policy facts, since those live in the company documents."""
 
 SCHEMA = {
     "type": "object",
