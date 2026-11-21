@@ -1,0 +1,7 @@
+# Milestone 1: skeleton + system prompt
+anthropic>=1.0,<2
+streamlit>=1.40
+pyyaml>=6.0
+python-dotenv>=1.0
+
+# Later milestones add: chromadb, mcp, pyjwt, presidio, arize-phoenix, pytest

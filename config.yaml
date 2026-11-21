@@ -1,0 +1,17 @@
+# Central settings. Changing anything here is a "release" that should pass evals (milestone 9).
+
+# Which system prompt file to load: prompts/system_<prompt_version>.md
+prompt_version: v1
+
+# Model tiers. The router (milestone 7) picks a tier per request; until then everything is "cheap".
+models:
+  cheap:                       # classification, guardrails, summaries, simple FAQ answers
+    id: claude-haiku-5-5
+    effort: low
+    max_tokens: 4000
+  smart:                       # multi-step, tool-heavy requests and the eval judge
+    id: claude-sonnet-5-5
+    effort: medium
+    max_tokens: 16000
+
+default_tier: cheap

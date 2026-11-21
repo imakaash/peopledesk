@@ -1,0 +1,22 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# generated data (recreated by data/seed.py and `python -m app.rag ingest`)
+data/*.db
+.chroma/
+
+# eval reports
+evals/reports/
+
+# local agent skills (symlinks into the conda env, created by streamlit)
+.agents/
+.claude/skills/
+
+# editor / OS
+.DS_Store
+.vscode/
