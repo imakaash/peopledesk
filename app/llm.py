@@ -123,14 +123,18 @@ def complete(
     system: str | None = None,
     tier: str | None = None,
     json_schema: dict | None = None,
+    effort: str | None = None,
 ) -> Reply:
     """Non-streaming call, for background jobs such as classifiers, summaries and judges.
 
     With json_schema, structured outputs guarantee reply.text is JSON matching the
     schema, so callers can json.loads() it without defensive parsing.
+    `effort` overrides the tier's default (e.g. a judge needs more reasoning than chat).
     """
     tier = tier or CONFIG["default_tier"]
     req = _request(tier, system or load_system_prompt(), messages)
+    if effort:
+        req["output_config"]["effort"] = effort
     if json_schema:
         req["output_config"]["format"] = {"type": "json_schema", "schema": json_schema}
     if tier == "smart":

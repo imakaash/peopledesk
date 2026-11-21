@@ -80,6 +80,29 @@ def show_tools(calls: list[dict]) -> None:
                 st.code(c["output"][:1500], language="json")
 
 
+def show_guard(g: dict | None) -> None:
+    if not g:
+        return
+    gi, go = g["in"], g.get("out")
+    flags = []
+    if gi.pii or (go and go.pii):
+        flags.append("PII redacted")
+    if gi.blocked:
+        flags.append(f"blocked: {gi.verdict}")
+    if go and go.grounded is False:
+        flags.append("ungrounded")
+    with st.expander("Guardrails" + (f" ⚠️ {', '.join(flags)}" if flags else " ✅")):
+        st.markdown(f"**Input:** `{gi.verdict}`: {gi.reason or 'n/a'}")
+        if gi.pii:
+            st.markdown(f"**PII masked in your message:** {', '.join(gi.pii)}")
+        if go:
+            st.markdown(f"**Grounded:** {'not checked' if go.grounded is None else go.grounded}")
+            for c in go.unsupported_claims:
+                st.markdown(f"- unsupported: {c}")
+            if go.pii:
+                st.markdown(f"**PII masked in the answer:** {', '.join(go.pii)}")
+
+
 def show_memory(wm) -> None:
     """What the harness put into working memory for the last turn."""
     with st.expander("Working memory (last turn)"):
@@ -136,6 +159,7 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
         show_tools(msg.get("tools", []))
         show_sources(msg.get("sources", []))
+        show_guard(msg.get("guard"))
 
 if prompt := st.chat_input("Ask about leave, benefits, payroll..."):
     history = list(st.session_state.messages)
@@ -158,9 +182,12 @@ if prompt := st.chat_input("Ask about leave, benefits, payroll..."):
             st.stop()
 
     reply, wm = result["reply"], result["memory"]
-    st.session_state.messages.append(
-        {"role": "assistant", "content": reply.text, "sources": wm.hits, "tools": result["tool_calls"]}
-    )
+    # Keep the PII-redacted question in history, so raw card numbers etc. never get re-sent.
+    st.session_state.messages[-1]["content"] = result["question"]
+    st.session_state.messages.append({
+        "role": "assistant", "content": reply.text, "sources": wm.hits, "tools": result["tool_calls"],
+        "guard": {"in": result["guard_in"], "out": result["guard_out"]},
+    })
     st.session_state.last_reply = reply
     st.session_state.last_memory = wm
     st.rerun()  # refresh the sidebar panels

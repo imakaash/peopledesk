@@ -26,6 +26,14 @@ rag:
 agent:
   max_tool_rounds: 6           # safety stop: model calls per turn before giving up
 
+# Guardrails (milestone 6)
+guardrails:
+  pii_entities: [CREDIT_CARD, IBAN_CODE, US_SSN, US_PASSPORT, CRYPTO, PASSWORD]  # masked in input and output
+  pii_min_score: 0.5           # Presidio confidence cut-off (drops weak guesses like 0.4 "driver licence")
+  classify_input: true         # Haiku injection / off-topic screen before the agent loop
+  check_groundedness: true     # Haiku judge after the loop; flags answers not backed by docs or tools
+  judge_effort: medium         # judging needs more reasoning than chatting; "low" gave false alarms
+
 # Harness memory (milestone 3)
 memory:
   db_path: data/memory.db      # episodic memory + user profiles (SQLite, git-ignored)

@@ -1,10 +1,12 @@
 """THE HARNESS: everything around the model that turns one LLM call into an assistant.
 
 Per turn:
+  0. input guardrails: redact PII, block injection / off-topic (ends the turn early)
   1. assemble working memory: profile + facts + past episodes + skills + RAG docs
   2. run the agent loop: model -> tool calls (via MCP) -> model ... until it answers
-  3. write the turn to episodic memory
-  4. in the background, let the summarizer consolidate episodes into semantic memory
+  3. output guardrails: redact PII, check groundedness
+  4. write the turn to episodic memory
+  5. in the background, let the summarizer consolidate episodes into semantic memory
 
 The system prompt stays fixed. Everything that changes per user or per question
 goes into the final user turn, so the system prefix can be cached.
@@ -16,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Iterator
 
-from app import auth, llm, mcp_client, memory, rag, summarizer
+from app import auth, guardrails, llm, mcp_client, memory, rag, summarizer
 
 
 @dataclass
@@ -99,6 +101,19 @@ class Agent:
 
         `history` is the earlier turns of this session, without the new question.
         """
+        # INPUT GUARDRAILS: redact PII, then screen for injection / off-topic.
+        # A blocked turn ends here: no retrieval, no tools, and it's not saved to memory.
+        guard_in = guardrails.check_input(question)
+        question = guard_in.text
+        if guard_in.blocked:
+            yield guard_in.safe_reply
+            result.update(
+                reply=llm.Reply(guard_in.safe_reply, model="guardrail", tier="none", stop_reason="guardrail_blocked", usage={}),
+                memory=WorkingMemory(user_id=self.user_id, role=self.role, question=question),
+                tool_calls=[], guard_in=guard_in, guard_out=None, question=question,
+            )
+            return
+
         wm = self.assemble(question)
         messages = window(history) + [{"role": "user", "content": wm.render()}]
         mcp = mcp_client.client()
@@ -137,7 +152,17 @@ class Agent:
             texts.append(stop)
             yield "\n\n" + stop
 
-        answer = "\n\n".join(texts)
+        # OUTPUT GUARDRAILS: redact PII, and check the answer against its sources.
+        # Trade-off: the answer has already streamed, so a redaction only takes effect
+        # in the stored copy (what the UI re-renders and memory keeps). For strict
+        # deployments, buffer the answer and check it before showing anything.
+        guard_out = guardrails.check_output(
+            "\n\n".join(texts), wm.hits, tool_calls, wm.skills, [t["name"] for t in tools]
+        )
+        if guard_out.grounded is False:
+            yield guardrails.UNGROUNDED_NOTE
+        answer = guard_out.text
+
         memory.save_episode(self.user_id, self.session_id, question, answer)
         # Consolidation is a separate LLM call, so it runs off the request path.
         threading.Thread(
@@ -145,4 +170,4 @@ class Agent:
         ).start()
 
         reply.text, reply.usage = answer, usage
-        result.update(reply=reply, memory=wm, tool_calls=tool_calls)
+        result.update(reply=reply, memory=wm, tool_calls=tool_calls, guard_in=guard_in, guard_out=guard_out, question=question)
