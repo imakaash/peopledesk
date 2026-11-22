@@ -20,7 +20,9 @@ An HR and onboarding assistant for **Nimbus Labs**, a made-up software company. 
 
 ## Architecture
 
-One chat turn, from question to answer:
+![PeopleDesk architecture: the harness with its agent loop and four memory types, and the LLM Ops loop](docs/architecture.svg)
+
+The same chat turn, step by step:
 
 ```mermaid
 flowchart TD
