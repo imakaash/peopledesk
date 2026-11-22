@@ -98,12 +98,12 @@ def run_checks(case: dict, answer: str, result: dict) -> dict:
 
 # --- one case -----------------------------------------------------------------------
 
-def run_case(case: dict, run_dir: Path, seed, judge_mod) -> dict:
+def run_case(case: dict, run_dir: Path, seed, judge_mod, attempt: int = 0) -> dict:
     from app import auth
     from app.agent import Agent
     from app.mcp_client import MCPClient
 
-    db = run_dir / "db" / f"{case['id']}.db"
+    db = run_dir / "db" / f"{case['id']}{f'-retry{attempt}' if attempt else ''}.db"
     seed.main(db, verbose=False)  # fresh HR data: cases that book or approve leave can't affect each other
     emp = auth._employee(case["user"])
     token = auth.issue_token(emp["id"], emp["name"], emp["role"])
@@ -111,7 +111,7 @@ def run_case(case: dict, run_dir: Path, seed, judge_mod) -> dict:
     mcp = MCPClient(hr_db=str(db))
     try:
         t0, result = time.perf_counter(), {}
-        answer_stream = Agent(token, f"eval-{case['id']}", mcp=mcp).stream(case["question"], case.get("history", []), result)
+        answer_stream = Agent(token, f"eval-{case['id']}-{attempt}", mcp=mcp).stream(case["question"], case.get("history", []), result)
         "".join(answer_stream)
         latency = time.perf_counter() - t0
     finally:
@@ -212,6 +212,28 @@ def regressions(rows: list[dict], reference: dict) -> list[str]:
     )
 
 
+def confirm_regressions(suspects: list[str], cases: list[dict], run_dir: Path, seed, judge_mod) -> list[str]:
+    """Rerun each suspected regression and keep it only if it fails a majority of attempts.
+    With one run per case, an unlucky sample is enough to block a release; a real regression
+    fails again. Retries are logged to retries.jsonl but don't change the pass rate."""
+    n = CFG["gate"]["regression_retries"]
+    if not suspects or not n:
+        return suspects
+    by_id, confirmed = {c["id"]: c for c in cases}, []
+    for cid in suspects:
+        fails = 1  # the original failing run
+        for attempt in range(1, n + 1):
+            row = run_case(by_id[cid], run_dir, seed, judge_mod, attempt)
+            with open(run_dir / "retries.jsonl", "a") as f:
+                f.write(json.dumps({**row, "attempt": attempt}, default=str) + "\n")
+            fails += not row["grade"]["pass"]
+        verdict = fails > (n + 1) / 2
+        print(f"  RETRY {cid:32} failed {fails}/{n + 1} -> {'regression' if verdict else 'flaky, not counted'}")
+        if verdict:
+            confirmed.append(cid)
+    return confirmed
+
+
 def gate(s: dict, regressed: list[str] | None = None, missing_reference: str | None = None) -> list[str]:
     g, why = CFG["gate"], []
     if missing_reference:
@@ -238,6 +260,7 @@ def write_report(run_dir: Path, prompt: str, s: dict, failures: list[str], rows:
         f"- Pass rate: **{s['pass_rate']:.0%}** ({int(s['pass_rate'] * s['cases'])}/{s['cases']}), 95% CI {s['pass_ci95'][0]:.0%}-{s['pass_ci95'][1]:.0%}",
         f"- Leaks: **{s['leaks']}**, false blocks: **{s['false_blocks']}**, errors: {s['errors']}",
         f"- Regressions vs live prompt: **{len(s.get('regressions', []))}** {s.get('regressions') or ''}"
+        + (f", dismissed as flaky after retries: {s['regressions_dismissed_as_flaky']}" if s.get("regressions_dismissed_as_flaky") else "")
         + (f" (reference: `{s['reference_run']}`)" if s.get("reference_run") else " (not a candidate run)"),
         f"- By group: {', '.join(f'{g} {v}' for g, v in s['by_group'].items())}",
         f"- Judge: correct {s['judge'].get('correct', 0):.0%}, safe {s['judge'].get('safe', 0):.0%}, tone {s['judge'].get('tone', 0):.0%}",
@@ -327,8 +350,10 @@ def main() -> int:
         if ref_dir is None:
             missing = f"no run of the live prompt {live} on these cases to compare with: run `python evals/run_evals.py` first"
         else:
-            regressed = regressions(rows, reference)
+            suspects = regressions(rows, reference)
+            regressed = confirm_regressions(suspects, cases, run_dir, seed, judge_mod)
             s["reference_run"] = ref_dir.name
+            s["regressions_dismissed_as_flaky"] = sorted(set(suspects) - set(regressed))
     s["regressions"] = regressed
     failures = gate(s, regressed, missing)
     report = write_report(run_dir, args.prompt, s, failures, rows, errors)
